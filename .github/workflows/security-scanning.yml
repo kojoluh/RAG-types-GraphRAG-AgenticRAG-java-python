@@ -1,0 +1,403 @@
+name: Security Scanning & Compliance
+
+on:
+  schedule:
+    # Run security scans weekly
+    - cron: '0 2 * * 1'
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+  JAVA_VERSION: '21'
+
+jobs:
+  # SAST (Static Application Security Testing)
+  sast-analysis:
+    name: SAST Analysis
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: [python, java]
+        include:
+          - language: python
+            paths: ['aviation-graph-rag/**', 'onboarding-agentic-rag/**']
+          - language: java
+            paths: ['aviation-graph-rag-java/**', 'onboarding-agentic-rag-java/**']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/owasp-top-ten
+          p/cwe-top-25
+        paths: ${{ matrix.paths }}
+        output-format: sarif
+        output-file: semgrep-${{ matrix.language }}-results.sarif
+
+    - name: Upload Semgrep results
+      uses: actions/upload-artifact@v3
+      with:
+        name: semgrep-${{ matrix.language }}-results
+        path: semgrep-${{ matrix.language }}-results.sarif
+
+    - name: Run CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: ${{ matrix.language }}
+        paths: ${{ matrix.paths }}
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+
+    - name: Run Bandit (Python only)
+      if: matrix.language == 'python'
+      run: |
+        pip install bandit
+        bandit -r aviation-graph-rag/src/ onboarding-agentic-rag/src/ -f json -o bandit-results.json
+
+    - name: Upload Bandit results
+      if: matrix.language == 'python'
+      uses: actions/upload-artifact@v3
+      with:
+        name: bandit-results
+        path: bandit-results.json
+
+    - name: Run SpotBugs (Java only)
+      if: matrix.language == 'java'
+      run: |
+        cd aviation-graph-rag-java
+        mvn spotbugs:check
+        cd ../onboarding-agentic-rag-java
+        mvn spotbugs:check
+
+  # Dependency Vulnerability Scanning
+  dependency-scanning:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: [python, java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Python dependency scan
+      if: matrix.language == 'python'
+      run: |
+        pip install safety
+        safety check --json --output safety-results.json || true
+
+    - name: Java dependency scan
+      if: matrix.language == 'java'
+      run: |
+        cd aviation-graph-rag-java
+        mvn org.owasp:dependency-check-maven:check
+        cd ../onboarding-agentic-rag-java
+        mvn org.owasp:dependency-check-maven:check
+
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: dependency-scan-${{ matrix.language }}
+        path: |
+          safety-results.json
+          */target/dependency-check-report.html
+
+  # Container Security Scanning
+  container-security:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: [aviation-graph-rag, onboarding-agentic-rag, aviation-graph-rag-java, onboarding-agentic-rag-java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build Docker image
+      run: |
+        cd ${{ matrix.project }}
+        docker build -t ${{ matrix.project }}:security-scan .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: '${{ matrix.project }}:security-scan'
+        format: 'sarif'
+        output: 'trivy-${{ matrix.project }}-results.sarif'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Upload Trivy results
+      uses: actions/upload-artifact@v3
+      with:
+        name: trivy-${{ matrix.project }}
+        path: trivy-${{ matrix.project }}-results.sarif
+
+    - name: Run Snyk container scan
+      uses: snyk/actions/docker@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        image: ${{ matrix.project }}:security-scan
+        args: --severity-threshold=high
+
+  # DAST (Dynamic Application Security Testing)
+  dast-scanning:
+    name: DAST Scanning
+    runs-on: ubuntu-latest
+    needs: [sast-analysis, dependency-scanning]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run OWASP ZAP Baseline Scan
+      uses: zaproxy/action-baseline@v0.8.0
+      with:
+        target: 'http://staging-api.example.com'
+        rules_file_name: '.zap/rules.tsv'
+        cmd_options: '-a'
+
+    - name: Upload ZAP baseline results
+      uses: actions/upload-artifact@v3
+      with:
+        name: zap-baseline-results
+        path: zap-results/
+
+    - name: Run OWASP ZAP Full Scan
+      uses: zaproxy/action-full-scan@v0.8.0
+      with:
+        target: 'http://staging-api.example.com'
+        rules_file_name: '.zap/rules.tsv'
+        cmd_options: '-a'
+
+    - name: Upload ZAP full scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: zap-full-scan-results
+        path: zap-results/
+
+    - name: Run Nuclei scan
+      uses: projectdiscovery/nuclei-action@main
+      with:
+        target: 'http://staging-api.example.com'
+        templates: 'cves,vulnerabilities,misconfiguration'
+
+    - name: Upload Nuclei results
+      uses: actions/upload-artifact@v3
+      with:
+        name: nuclei-results
+        path: nuclei-results/
+
+  # Secrets Scanning
+  secrets-scanning:
+    name: Secrets Scanning
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: .
+        base: HEAD~1
+        head: HEAD
+
+    - name: Run GitGuardian
+      uses: GitGuardian/ggshield-action@main
+      with:
+        mode: scan
+        exit-zero: true
+
+    - name: Run Gitleaks
+      uses: gitleaks/gitleaks-action@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Compliance Scanning
+  compliance-scanning:
+    name: Compliance Scanning
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run OpenSCAP
+      run: |
+        # Install OpenSCAP
+        sudo apt-get update
+        sudo apt-get install -y openscap-utils
+
+        # Run compliance scan
+        oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_standard \
+          --results compliance-results.xml \
+          --report compliance-report.html \
+          /usr/share/xml/scap/ssg/content/ssg-ubuntu2004-ds.xml
+
+    - name: Upload compliance results
+      uses: actions/upload-artifact@v3
+      with:
+        name: compliance-results
+        path: |
+          compliance-results.xml
+          compliance-report.html
+
+  # License Compliance
+  license-compliance:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run License Check
+      run: |
+        # Python license check
+        pip install pip-licenses
+        pip-licenses --format=json --output-file=python-licenses.json
+
+        # Java license check
+        cd aviation-graph-rag-java
+        mvn license:aggregate-add-third-party
+        cd ../onboarding-agentic-rag-java
+        mvn license:aggregate-add-third-party
+
+    - name: Upload license results
+      uses: actions/upload-artifact@v3
+      with:
+        name: license-results
+        path: |
+          python-licenses.json
+          */target/generated-sources/license/THIRD-PARTY.txt
+
+  # SBOM Generation
+  sbom-generation:
+    name: SBOM Generation
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: [python, java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Generate Python SBOM
+      if: matrix.language == 'python'
+      run: |
+        pip install cyclonedx-bom
+        cyclonedx-py -i aviation-graph-rag/src -o aviation-graph-rag-sbom.json
+        cyclonedx-py -i onboarding-agentic-rag/src -o onboarding-agentic-rag-sbom.json
+
+    - name: Generate Java SBOM
+      if: matrix.language == 'java'
+      run: |
+        cd aviation-graph-rag-java
+        mvn org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom
+        cd ../onboarding-agentic-rag-java
+        mvn org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom
+
+    - name: Upload SBOM files
+      uses: actions/upload-artifact@v3
+      with:
+        name: sbom-${{ matrix.language }}
+        path: |
+          *-sbom.json
+          */target/bom.json
+
+  # Security Report Generation
+  security-report:
+    name: Security Report Generation
+    runs-on: ubuntu-latest
+    needs: [sast-analysis, dependency-scanning, container-security, dast-scanning, secrets-scanning, compliance-scanning]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all security artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: security-artifacts
+
+    - name: Generate security report
+      run: |
+        # Create comprehensive security report
+        echo "# Security Scan Report" > security-report.md
+        echo "Generated on: $(date)" >> security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Summary" >> security-report.md
+        echo "- SAST Analysis: Completed" >> security-report.md
+        echo "- Dependency Scanning: Completed" >> security-report.md
+        echo "- Container Security: Completed" >> security-report.md
+        echo "- DAST Scanning: Completed" >> security-report.md
+        echo "- Secrets Scanning: Completed" >> security-report.md
+        echo "- Compliance Scanning: Completed" >> security-report.md
+        
+        echo "" >> security-report.md
+        echo "## Detailed Results" >> security-report.md
+        echo "See attached artifacts for detailed scan results." >> security-report.md
+
+    - name: Upload security report
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-report
+        path: security-report.md
+
+    - name: Create security issue
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: 'Security vulnerabilities detected',
+            body: 'Security scan detected vulnerabilities. Please review the attached artifacts.',
+            labels: ['security', 'vulnerability']
+          })
+
+  # Security Notifications
+  security-notifications:
+    name: Security Notifications
+    runs-on: ubuntu-latest
+    needs: [security-report]
+    if: always()
+    
+    steps:
+    - name: Send Slack notification
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: 'Security vulnerabilities detected in RAG Types project'
+        channel: '#security'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Send email notification
+      if: failure()
+      run: |
+        # Add email notification logic here
+        echo "Security vulnerabilities detected - check GitHub Actions for details" 

@@ -1,0 +1,174 @@
+spring:
+  application:
+    name: onboarding-agentic-rag
+  
+  # Database Configuration
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/onboarding}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:password}
+    driver-class-name: org.postgresql.Driver
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  
+  # Spring AI Configuration
+  ai:
+    openai:
+      api-key: ${SPRING_AI_OPENAI_API_KEY:}
+      chat:
+        options:
+          model: gpt-4
+          temperature: 0.1
+          max-tokens: 1500
+    
+    vectorstore:
+      chroma:
+        url: ${SPRING_AI_VECTOR_STORE_CHROMA_URL:http://localhost:8000}
+        collection-name: onboarding-knowledge
+        dimensions: 1536
+  
+  # Redis Configuration
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      password: ${SPRING_REDIS_PASSWORD:}
+      timeout: 2000ms
+  
+  # RabbitMQ Configuration
+  rabbitmq:
+    host: ${SPRING_RABBITMQ_HOST:localhost}
+    port: ${SPRING_RABBITMQ_PORT:5672}
+    username: ${SPRING_RABBITMQ_USERNAME:admin}
+    password: ${SPRING_RABBITMQ_PASSWORD:password}
+    virtual-host: /
+  
+  # Security Configuration
+  security:
+    jwt:
+      secret: ${JWT_SECRET:your-secret-key-here}
+      expiration: 86400000 # 24 hours
+  
+  # Cache Configuration
+  cache:
+    type: redis
+    redis:
+      time-to-live: 3600000 # 1 hour
+
+# Server Configuration
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+# Logging Configuration
+logging:
+  level:
+    com.onboarding.rag: DEBUG
+    org.springframework.ai: DEBUG
+    org.springframework.amqp: INFO
+    org.springframework.security: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/onboarding-agentic-rag.log
+
+# Management Endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# Actuator Configuration
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# Monitoring Configuration
+management:
+  metrics:
+    tags:
+      application: onboarding-agentic-rag
+      environment: ${SPRING_PROFILES_ACTIVE:dev}
+
+# Agentic RAG Configuration
+onboarding:
+  agentic-rag:
+    max-agents-per-query: 5
+    agent-timeout: 30s
+    confidence-threshold: 0.1
+    cache-enabled: true
+    audit-enabled: true
+    personalization-enabled: true
+
+# ChromaDB Configuration
+chromadb:
+  client:
+    timeout: 30s
+    retry-attempts: 3
+    retry-delay: 1s
+
+# LangChain4j Configuration
+langchain4j:
+  open-ai:
+    api-key: ${SPRING_AI_OPENAI_API_KEY:}
+    model: gpt-4
+    temperature: 0.1
+    max-tokens: 1500
+
+# Performance Configuration
+spring:
+  jpa:
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 20
+        order_inserts: true
+        order_updates: true
+        batch_versioned_data: true
+
+# Security Headers
+server:
+  servlet:
+    session:
+      timeout: 30m
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
+    min-response-size: 1024
+
+# CORS Configuration
+spring:
+  web:
+    cors:
+      allowed-origins: "*"
+      allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+      allowed-headers: "*"
+      allow-credentials: true
+      max-age: 3600
+
+# WebSocket Configuration
+spring:
+  websocket:
+    max-text-message-size: 8192
+    max-binary-message-size: 8192 

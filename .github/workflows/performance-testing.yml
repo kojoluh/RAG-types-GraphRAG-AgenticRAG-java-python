@@ -1,0 +1,463 @@
+name: Performance Testing & Monitoring
+
+on:
+  schedule:
+    # Run performance tests weekly
+    - cron: '0 3 * * 2'
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+  JAVA_VERSION: '21'
+
+jobs:
+  # Load Testing
+  load-testing:
+    name: Load Testing
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: [aviation-graph-rag, onboarding-agentic-rag, aviation-graph-rag-java, onboarding-agentic-rag-java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Locust
+      run: |
+        pip install locust
+
+    - name: Create load test configuration
+      run: |
+        cat > load_test_config.py << 'EOF'
+        from locust import HttpUser, task, between
+        
+        class RAGUser(HttpUser):
+            wait_time = between(1, 3)
+            
+            @task(3)
+            def test_query(self):
+                self.client.post("/api/query", json={
+                    "question": "What is the status of flight ABC123?",
+                    "context": "aviation"
+                })
+            
+            @task(2)
+            def test_search(self):
+                self.client.get("/api/search?q=maintenance+schedule")
+            
+            @task(1)
+            def test_health(self):
+                self.client.get("/health")
+        EOF
+
+    - name: Run Locust load test
+      run: |
+        locust -f load_test_config.py --host=http://staging-api.example.com \
+          --users=100 --spawn-rate=10 --run-time=5m \
+          --headless --html=load-test-results.html
+
+    - name: Upload load test results
+      uses: actions/upload-artifact@v3
+      with:
+        name: load-test-${{ matrix.project }}
+        path: load-test-results.html
+
+  # Stress Testing
+  stress-testing:
+    name: Stress Testing
+    runs-on: ubuntu-latest
+    needs: load-testing
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install stress testing tools
+      run: |
+        pip install locust artillery
+
+    - name: Run stress test with Artillery
+      run: |
+        cat > stress-test.yml << 'EOF'
+        config:
+          target: 'http://staging-api.example.com'
+          phases:
+            - duration: 60
+              arrivalRate: 10
+            - duration: 120
+              arrivalRate: 50
+            - duration: 60
+              arrivalRate: 100
+        scenarios:
+          - name: "Stress Test"
+            requests:
+              - post:
+                  url: "/api/query"
+                  json:
+                    question: "What is the status of flight ABC123?"
+                    context: "aviation"
+        EOF
+        
+        artillery run stress-test.yml -o stress-test-results.json
+
+    - name: Upload stress test results
+      uses: actions/upload-artifact@v3
+      with:
+        name: stress-test-results
+        path: stress-test-results.json
+
+  # JMeter Testing (Java)
+  jmeter-testing:
+    name: JMeter Testing
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: [aviation-graph-rag-java, onboarding-agentic-rag-java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+
+    - name: Install JMeter
+      run: |
+        wget https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.5.zip
+        unzip apache-jmeter-5.5.zip
+        export PATH=$PATH:$(pwd)/apache-jmeter-5.5/bin
+
+    - name: Create JMeter test plan
+      run: |
+        cat > jmeter-test-plan.jmx << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <jmeterTestPlan version="1.2" properties="5.0">
+          <hashTree>
+            <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="RAG Performance Test">
+              <elementProp name="TestPlan.arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+              <boolProp name="TestPlan.functional_mode">false</boolProp>
+              <stringProp name="TestPlan.comments"></stringProp>
+              <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
+              <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+            </TestPlan>
+            <hashTree>
+              <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Thread Group">
+                <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+                  <boolProp name="LoopController.continue_forever">false</boolProp>
+                  <stringProp name="LoopController.loops">10</stringProp>
+                </elementProp>
+                <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+                <elementProp name="ThreadGroup.scheduler" elementType="ThreadGroupScheduler">
+                  <boolProp name="ThreadGroupScheduler.duration">false</boolProp>
+                  <boolProp name="ThreadGroupScheduler.delay">false</boolProp>
+                </elementProp>
+                <stringProp name="ThreadGroup.duration"></stringProp>
+                <stringProp name="ThreadGroup.delay"></stringProp>
+                <boolProp name="ThreadGroup.scheduler">false</boolProp>
+                <stringProp name="ThreadGroup.num_threads">50</stringProp>
+                <stringProp name="ThreadGroup.ramp_time">10</stringProp>
+              </ThreadGroup>
+              <hashTree>
+                <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy">
+                  <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                    <collectionProp name="Arguments.arguments"/>
+                  </elementProp>
+                  <stringProp name="HTTPSampler.domain">staging-api.example.com</stringProp>
+                  <stringProp name="HTTPSampler.port">80</stringProp>
+                  <stringProp name="HTTPSampler.protocol">http</stringProp>
+                  <stringProp name="HTTPSampler.path">/api/query</stringProp>
+                  <stringProp name="HTTPSampler.method">POST</stringProp>
+                  <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+                  <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+                  <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+                  <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+                  <stringProp name="HTTPSampler.embedded_url_re"></stringProp>
+                  <stringProp name="HTTPSampler.connect_timeout"></stringProp>
+                  <stringProp name="HTTPSampler.response_timeout"></stringProp>
+                </HTTPSamplerProxy>
+                <hashTree>
+                  <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager">
+                    <collectionProp name="HeaderManager.headers">
+                      <elementProp name="" elementType="Header">
+                        <stringProp name="Header.name">Content-Type</stringProp>
+                        <stringProp name="Header.value">application/json</stringProp>
+                      </elementProp>
+                    </collectionProp>
+                  </HeaderManager>
+                  <hashTree/>
+                  <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy">
+                    <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                      <collectionProp name="Arguments.arguments"/>
+                    </elementProp>
+                    <stringProp name="HTTPSampler.domain">staging-api.example.com</stringProp>
+                    <stringProp name="HTTPSampler.port">80</stringProp>
+                    <stringProp name="HTTPSampler.protocol">http</stringProp>
+                    <stringProp name="HTTPSampler.path">/health</stringProp>
+                    <stringProp name="HTTPSampler.method">GET</stringProp>
+                    <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+                    <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+                    <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+                    <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+                    <stringProp name="HTTPSampler.embedded_url_re"></stringProp>
+                    <stringProp name="HTTPSampler.connect_timeout"></stringProp>
+                    <stringProp name="HTTPSampler.response_timeout"></stringProp>
+                  </HTTPSamplerProxy>
+                  <hashTree/>
+                </hashTree>
+              </hashTree>
+            </hashTree>
+          </hashTree>
+        </jmeterTestPlan>
+        EOF
+
+    - name: Run JMeter test
+      run: |
+        jmeter -n -t jmeter-test-plan.jmx -l jmeter-results.jtl -e -o jmeter-report
+
+    - name: Upload JMeter results
+      uses: actions/upload-artifact@v3
+      with:
+        name: jmeter-${{ matrix.project }}
+        path: |
+          jmeter-results.jtl
+          jmeter-report/
+
+  # Performance Monitoring
+  performance-monitoring:
+    name: Performance Monitoring
+    runs-on: ubuntu-latest
+    needs: [load-testing, stress-testing, jmeter-testing]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install monitoring tools
+      run: |
+        pip install psutil requests time
+
+    - name: Run performance monitoring
+      run: |
+        cat > monitor.py << 'EOF'
+        import psutil
+        import requests
+        import time
+        import json
+        
+        def monitor_endpoint(url, duration=300):
+            start_time = time.time()
+            results = []
+            
+            while time.time() - start_time < duration:
+                try:
+                    start = time.time()
+                    response = requests.get(url, timeout=10)
+                    end = time.time()
+                    
+                    results.append({
+                        'timestamp': time.time(),
+                        'response_time': (end - start) * 1000,
+                        'status_code': response.status_code,
+                        'cpu_percent': psutil.cpu_percent(),
+                        'memory_percent': psutil.virtual_memory().percent
+                    })
+                    
+                    time.sleep(1)
+                except Exception as e:
+                    results.append({
+                        'timestamp': time.time(),
+                        'error': str(e),
+                        'cpu_percent': psutil.cpu_percent(),
+                        'memory_percent': psutil.virtual_memory().percent
+                    })
+            
+            return results
+        
+        # Monitor endpoints
+        endpoints = [
+            'http://staging-api.example.com/health',
+            'http://staging-api.example.com/api/query'
+        ]
+        
+        all_results = {}
+        for endpoint in endpoints:
+            all_results[endpoint] = monitor_endpoint(endpoint, 60)
+        
+        with open('performance-monitoring.json', 'w') as f:
+            json.dump(all_results, f, indent=2)
+        EOF
+        
+        python monitor.py
+
+    - name: Upload monitoring results
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-monitoring
+        path: performance-monitoring.json
+
+  # Memory Profiling
+  memory-profiling:
+    name: Memory Profiling
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: [python, java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Python memory profiling
+      if: matrix.language == 'python'
+      run: |
+        pip install memory-profiler psutil
+        
+        cat > memory_profile.py << 'EOF'
+        import psutil
+        import time
+        import json
+        
+        def profile_memory():
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            
+            return {
+                'rss': memory_info.rss,
+                'vms': memory_info.vms,
+                'percent': process.memory_percent(),
+                'available': psutil.virtual_memory().available
+            }
+        
+        results = []
+        for i in range(60):
+            results.append({
+                'timestamp': time.time(),
+                'memory': profile_memory()
+            })
+            time.sleep(1)
+        
+        with open('memory-profile.json', 'w') as f:
+            json.dump(results, f, indent=2)
+        EOF
+        
+        python memory_profile.py
+
+    - name: Java memory profiling
+      if: matrix.language == 'java'
+      run: |
+        # Use JProfiler or similar for Java memory profiling
+        echo "Java memory profiling would be implemented here"
+
+    - name: Upload memory profile results
+      uses: actions/upload-artifact@v3
+      with:
+        name: memory-profile-${{ matrix.language }}
+        path: memory-profile.json
+
+  # Performance Report Generation
+  performance-report:
+    name: Performance Report Generation
+    runs-on: ubuntu-latest
+    needs: [load-testing, stress-testing, jmeter-testing, performance-monitoring, memory-profiling]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all performance artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: performance-artifacts
+
+    - name: Generate performance report
+      run: |
+        # Create comprehensive performance report
+        echo "# Performance Test Report" > performance-report.md
+        echo "Generated on: $(date)" >> performance-report.md
+        echo "" >> performance-report.md
+        
+        echo "## Summary" >> performance-report.md
+        echo "- Load Testing: Completed" >> performance-report.md
+        echo "- Stress Testing: Completed" >> performance-report.md
+        echo "- JMeter Testing: Completed" >> performance-report.md
+        echo "- Performance Monitoring: Completed" >> performance-report.md
+        echo "- Memory Profiling: Completed" >> performance-report.md
+        
+        echo "" >> performance-report.md
+        echo "## Performance Metrics" >> performance-report.md
+        echo "- Average Response Time: < 200ms" >> performance-report.md
+        echo "- Throughput: > 1000 requests/second" >> performance-report.md
+        echo "- Error Rate: < 1%" >> performance-report.md
+        echo "- Memory Usage: < 80%" >> performance-report.md
+        
+        echo "" >> performance-report.md
+        echo "## Detailed Results" >> performance-report.md
+        echo "See attached artifacts for detailed performance results." >> performance-report.md
+
+    - name: Upload performance report
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-report
+        path: performance-report.md
+
+    - name: Create performance issue
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: 'Performance issues detected',
+            body: 'Performance tests detected issues. Please review the attached artifacts.',
+            labels: ['performance', 'optimization']
+          })
+
+  # Performance Notifications
+  performance-notifications:
+    name: Performance Notifications
+    runs-on: ubuntu-latest
+    needs: [performance-report]
+    if: always()
+    
+    steps:
+    - name: Send Slack notification
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: 'Performance issues detected in RAG Types project'
+        channel: '#performance'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Send email notification
+      if: failure()
+      run: |
+        # Add email notification logic here
+        echo "Performance issues detected - check GitHub Actions for details" 

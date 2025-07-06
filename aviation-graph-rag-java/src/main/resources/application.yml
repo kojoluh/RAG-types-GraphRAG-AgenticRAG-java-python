@@ -1,0 +1,151 @@
+spring:
+  application:
+    name: aviation-graph-rag
+  
+  # Neo4j Configuration
+  neo4j:
+    uri: ${SPRING_NEO4J_URI:bolt://localhost:7687}
+    authentication:
+      username: ${SPRING_NEO4J_AUTHENTICATION_USERNAME:neo4j}
+      password: ${SPRING_NEO4J_AUTHENTICATION_PASSWORD:password}
+  
+  # Spring AI Configuration
+  ai:
+    openai:
+      api-key: ${SPRING_AI_OPENAI_API_KEY:}
+      chat:
+        options:
+          model: gpt-4
+          temperature: 0.1
+          max-tokens: 1000
+    
+    vectorstore:
+      weaviate:
+        url: ${SPRING_AI_VECTOR_STORE_WEAVIATE_URL:http://localhost:8080}
+        api-key: ${SPRING_AI_VECTOR_STORE_WEAVIATE_API_KEY:}
+        dimensions: 1536
+        index-name: aviation-knowledge
+  
+  # Redis Configuration
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      password: ${SPRING_REDIS_PASSWORD:}
+      timeout: 2000ms
+  
+  # Security Configuration
+  security:
+    jwt:
+      secret: ${JWT_SECRET:your-secret-key-here}
+      expiration: 86400000 # 24 hours
+  
+  # Cache Configuration
+  cache:
+    type: redis
+    redis:
+      time-to-live: 3600000 # 1 hour
+
+# Server Configuration
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+# Logging Configuration
+logging:
+  level:
+    com.aviation.rag: DEBUG
+    org.springframework.ai: DEBUG
+    org.neo4j: INFO
+    org.springframework.security: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/aviation-graph-rag.log
+
+# Management Endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# Actuator Configuration
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# Monitoring Configuration
+management:
+  metrics:
+    tags:
+      application: aviation-graph-rag
+      environment: ${SPRING_PROFILES_ACTIVE:dev}
+
+# Graph RAG Configuration
+aviation:
+  graph-rag:
+    max-graph-results: 10
+    max-vector-results: 5
+    confidence-threshold: 0.1
+    processing-timeout: 30s
+    cache-enabled: true
+    audit-enabled: true
+
+# Neo4j Configuration
+neo4j:
+  connection-pool:
+    max-connection-lifetime: 1h
+    max-connection-pool-size: 50
+    connection-acquisition-timeout: 1m
+
+# Weaviate Configuration
+weaviate:
+  client:
+    timeout: 30s
+    retry-attempts: 3
+    retry-delay: 1s
+
+# Performance Configuration
+spring:
+  jpa:
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 20
+        order_inserts: true
+        order_updates: true
+        batch_versioned_data: true
+
+# Security Headers
+server:
+  servlet:
+    session:
+      timeout: 30m
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
+    min-response-size: 1024
+
+# CORS Configuration
+spring:
+  web:
+    cors:
+      allowed-origins: "*"
+      allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+      allowed-headers: "*"
+      allow-credentials: true
+      max-age: 3600 

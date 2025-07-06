@@ -1,0 +1,386 @@
+name: Deployment Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      version:
+        description: 'Version to deploy'
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: '3.11'
+  JAVA_VERSION: '21'
+
+jobs:
+  # Pre-deployment Validation
+  pre-deployment-validation:
+    name: Pre-deployment Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Validate environment variables
+      run: |
+        echo "Validating environment variables..."
+        # Add validation logic for required environment variables
+        # Example: Check if required secrets are set
+
+    - name: Validate infrastructure
+      run: |
+        echo "Validating infrastructure..."
+        # Add infrastructure validation logic
+        # Example: Check if Kubernetes cluster is accessible
+
+    - name: Validate dependencies
+      run: |
+        echo "Validating dependencies..."
+        # Add dependency validation logic
+        # Example: Check if databases are accessible
+
+  # Build and Package
+  build-packages:
+    name: Build and Package
+    runs-on: ubuntu-latest
+    needs: pre-deployment-validation
+    strategy:
+      matrix:
+        project: [aviation-graph-rag, onboarding-agentic-rag, aviation-graph-rag-java, onboarding-agentic-rag-java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python (for Python projects)
+      if: contains(matrix.project, 'rag') && !contains(matrix.project, 'java')
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Set up JDK (for Java projects)
+      if: contains(matrix.project, 'java')
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+
+    - name: Build Python project
+      if: contains(matrix.project, 'rag') && !contains(matrix.project, 'java')
+      run: |
+        cd ${{ matrix.project }}
+        pip install poetry
+        poetry install --only main
+        poetry build
+
+    - name: Build Java project
+      if: contains(matrix.project, 'java')
+      run: |
+        cd ${{ matrix.project }}
+        mvn clean package -DskipTests
+
+    - name: Build Docker image
+      run: |
+        cd ${{ matrix.project }}
+        docker build -t ${{ matrix.project }}:${{ github.sha }} .
+        docker tag ${{ matrix.project }}:${{ github.sha }} ${{ matrix.project }}:latest
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.project }}-artifacts
+        path: |
+          ${{ matrix.project }}/dist/
+          ${{ matrix.project }}/target/*.jar
+
+  # Security Scan
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-packages
+    strategy:
+      matrix:
+        project: [aviation-graph-rag, onboarding-agentic-rag, aviation-graph-rag-java, onboarding-agentic-rag-java]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: '${{ matrix.project }}:${{ github.sha }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-scan-${{ matrix.project }}
+        path: trivy-results.sarif
+
+  # Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-packages, security-scan]
+    if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'staging'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Deploy aviation-graph-rag
+        kubectl apply -f k8s/staging/aviation-graph-rag/
+        
+        # Deploy onboarding-agentic-rag
+        kubectl apply -f k8s/staging/onboarding-agentic-rag/
+        
+        # Deploy aviation-graph-rag-java
+        kubectl apply -f k8s/staging/aviation-graph-rag-java/
+        
+        # Deploy onboarding-agentic-rag-java
+        kubectl apply -f k8s/staging/onboarding-agentic-rag-java/
+
+    - name: Wait for deployment
+      run: |
+        kubectl rollout status deployment/aviation-graph-rag -n staging --timeout=300s
+        kubectl rollout status deployment/onboarding-agentic-rag -n staging --timeout=300s
+        kubectl rollout status deployment/aviation-graph-rag-java -n staging --timeout=300s
+        kubectl rollout status deployment/onboarding-agentic-rag-java -n staging --timeout=300s
+
+    - name: Run smoke tests
+      run: |
+        # Wait for services to be ready
+        sleep 30
+        
+        # Test health endpoints
+        curl -f http://staging-api.example.com/health
+        curl -f http://staging-api.example.com/actuator/health
+
+    - name: Run integration tests
+      run: |
+        # Run integration tests against staging
+        echo "Running integration tests against staging environment..."
+
+  # Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-packages, security-scan]
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'production'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Create backup
+      run: |
+        # Create backup of current deployment
+        kubectl get deployment -n production -o yaml > backup-$(date +%Y%m%d-%H%M%S).yaml
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Deploy aviation-graph-rag
+        kubectl apply -f k8s/production/aviation-graph-rag/
+        
+        # Deploy onboarding-agentic-rag
+        kubectl apply -f k8s/production/onboarding-agentic-rag/
+        
+        # Deploy aviation-graph-rag-java
+        kubectl apply -f k8s/production/aviation-graph-rag-java/
+        
+        # Deploy onboarding-agentic-rag-java
+        kubectl apply -f k8s/production/onboarding-agentic-rag-java/
+
+    - name: Wait for deployment
+      run: |
+        kubectl rollout status deployment/aviation-graph-rag -n production --timeout=300s
+        kubectl rollout status deployment/onboarding-agentic-rag -n production --timeout=300s
+        kubectl rollout status deployment/aviation-graph-rag-java -n production --timeout=300s
+        kubectl rollout status deployment/onboarding-agentic-rag-java -n production --timeout=300s
+
+    - name: Run health checks
+      run: |
+        # Wait for services to be ready
+        sleep 30
+        
+        # Test health endpoints
+        curl -f http://prod-api.example.com/health
+        curl -f http://prod-api.example.com/actuator/health
+
+    - name: Run production tests
+      run: |
+        # Run production-specific tests
+        echo "Running production tests..."
+
+  # Rollback (if needed)
+  rollback:
+    name: Rollback
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: failure()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Rollback deployment
+      run: |
+        # Determine environment
+        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          NAMESPACE=production
+          KUBE_CONFIG="${{ secrets.KUBE_CONFIG_PROD }}"
+        else
+          NAMESPACE=staging
+          KUBE_CONFIG="${{ secrets.KUBE_CONFIG }}"
+        fi
+        
+        echo "$KUBE_CONFIG" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+        
+        # Rollback deployments
+        kubectl rollout undo deployment/aviation-graph-rag -n $NAMESPACE
+        kubectl rollout undo deployment/onboarding-agentic-rag -n $NAMESPACE
+        kubectl rollout undo deployment/aviation-graph-rag-java -n $NAMESPACE
+        kubectl rollout undo deployment/onboarding-agentic-rag-java -n $NAMESPACE
+
+    - name: Notify rollback
+      run: |
+        echo "Deployment rolled back due to failure"
+
+  # Post-deployment Validation
+  post-deployment-validation:
+    name: Post-deployment Validation
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run health checks
+      run: |
+        # Determine environment
+        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          BASE_URL="http://prod-api.example.com"
+        else
+          BASE_URL="http://staging-api.example.com"
+        fi
+        
+        # Health checks
+        curl -f $BASE_URL/health
+        curl -f $BASE_URL/actuator/health
+
+    - name: Run performance tests
+      run: |
+        # Run basic performance tests
+        echo "Running performance tests..."
+
+    - name: Run security tests
+      run: |
+        # Run security tests
+        echo "Running security tests..."
+
+  # Monitoring Setup
+  monitoring-setup:
+    name: Monitoring Setup
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up monitoring
+      run: |
+        # Set up monitoring and alerting
+        echo "Setting up monitoring..."
+
+    - name: Configure alerts
+      run: |
+        # Configure alerts for the deployment
+        echo "Configuring alerts..."
+
+  # Notification
+  notification:
+    name: Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [post-deployment-validation, monitoring-setup]
+    if: always()
+    
+    steps:
+    - name: Send Slack notification
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: 'Deployment ${{ job.status }} for RAG Types project'
+        channel: '#deployments'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Send email notification
+      run: |
+        # Add email notification logic here
+        echo "Deployment ${{ job.status }} - check GitHub Actions for details"
+
+  # Cleanup
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [notification]
+    if: always()
+    
+    steps:
+    - name: Cleanup artifacts
+      run: |
+        # Clean up temporary files and artifacts
+        echo "Cleaning up artifacts..."
+
+    - name: Update deployment status
+      run: |
+        # Update deployment status in external systems
+        echo "Updating deployment status..." 

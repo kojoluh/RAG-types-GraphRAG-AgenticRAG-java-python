@@ -1,0 +1,236 @@
+version: '3.8'
+
+services:
+  # Agentic RAG Java API
+  onboarding-api-java:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8081:8080"
+    environment:
+      - SPRING_AI_VECTOR_STORE_CHROMA_URL=http://chromadb:8000
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SPRING_PROFILES_ACTIVE=prod
+    depends_on:
+      - chromadb
+      - redis
+      - message-queue
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+
+  # ChromaDB Vector Database
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
+    volumes:
+      - chromadb_data:/chroma/chroma
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+
+  # Message Queue (RabbitMQ)
+  message-queue:
+    image: rabbitmq:3.12-management
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=password
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+
+  # Agent Worker Pool
+  agent-workers-java:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      - SPRING_AI_VECTOR_STORE_CHROMA_URL=http://chromadb:8000
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_RABBITMQ_HOST=message-queue
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=admin
+      - SPRING_RABBITMQ_PASSWORD=password
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - onboarding-network
+    depends_on:
+      - chromadb
+      - redis
+      - message-queue
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+
+  # Orchestrator Service
+  orchestrator-java:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+    environment:
+      - SPRING_AI_VECTOR_STORE_CHROMA_URL=http://chromadb:8000
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_RABBITMQ_HOST=message-queue
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=admin
+      - SPRING_RABBITMQ_PASSWORD=password
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - onboarding-network
+    depends_on:
+      - chromadb
+      - redis
+      - message-queue
+    restart: unless-stopped
+
+  # LangSmith Monitoring
+  langsmith:
+    image: langchain/langsmith:latest
+    ports:
+      - "1984:1984"
+    environment:
+      - LANGCHAIN_ENDPOINT=http://localhost:1984
+      - LANGCHAIN_API_KEY=${LANGSMITH_API_KEY}
+    volumes:
+      - langsmith_data:/app/data
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./deployment/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deployment/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./deployment/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  # Knowledge Ingestion Service
+  knowledge-ingestion-java:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ingestion
+    environment:
+      - SPRING_AI_VECTOR_STORE_CHROMA_URL=http://chromadb:8000
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_AI_OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - onboarding-network
+    depends_on:
+      - chromadb
+      - redis
+    restart: unless-stopped
+
+  # User Management Service
+  user-management-java:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.user-management
+    ports:
+      - "8082:8080"
+    environment:
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/onboarding
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=password
+    volumes:
+      - ./data:/app/data
+    networks:
+      - onboarding-network
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=onboarding
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - onboarding-network
+    restart: unless-stopped
+
+volumes:
+  chromadb_data:
+  redis_data:
+  rabbitmq_data:
+  langsmith_data:
+  prometheus_data:
+  grafana_data:
+  postgres_data:
+
+networks:
+  onboarding-network:
+    driver: bridge 
