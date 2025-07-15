@@ -15,7 +15,7 @@ pinecone-client==2.2.4
 # LLM and RAG
 langchain==0.1.0
 langchain-openai==0.0.2
-langchain-community==0.0.10
+langchain-community==0.2.19
 openai==1.3.7
 
 # Embeddings
