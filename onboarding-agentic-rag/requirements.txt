@@ -59,4 +59,4 @@ redis==5.0.1
 
 # Enterprise-specific
 ldap3==2.9.1
-pyjwt==2.8.0 
+pyjwt==2.12.0 
